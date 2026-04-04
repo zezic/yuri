@@ -22,43 +22,44 @@ The Rust host implements the Emscripten runtime that the WASM module expects: me
 
 ## Quick Start
 
+Both voices work out of the box:
+
 ```bash
-# English works out of the box:
+# English (Zoe, compact quality)
 cargo run --release -- --text "Hello world" --voice-dir wasm/voicedata_enu -o hello.wav
 
-# For Russian Yuri, first set up the voice data:
-# 1. Place vocalizer-voice-yuri-PremiumHigh.nvda-addon in assets/
-# 2. Run: ./setup.sh
+# Russian (Yuri, EmbeddedHigh quality)
+cargo run --release -- --text "Привет мир" --voice-dir wasm/voicedata_yuri_high -o privet.wav
+```
+
+For PremiumHigh quality Yuri (144MB synthesis database), run `./setup.sh` first:
+
+```bash
+./setup.sh  # downloads and extracts the NVDA addon
 cargo run --release -- --text "Привет мир" --voice-dir wasm/voicedata_yuri_full -o privet.wav
 ```
 
 Text is passed to the engine as UTF-16 LE (the engine's native character format).
 
-## Voice Data Setup
+## Voices
 
-### English (Zoe, compact)
+### English - Zoe (compact, 19 MB)
 
-The demo voice data is available from the Code Factory CDN:
+Included in repo. Voice data from the Code Factory WebApps SDK demo CDN.
+
+### Russian - Yuri EmbeddedHigh (55 MB)
+
+Included in repo. Single-file embedded voice from the [Vocalizer Expressive 2 NVDA addon](https://nvda-addons.ru/get.php?file=vocalizer_expressive2_voice_Russian_Yuri_EmbeddedHigh).
+
+### Russian - Yuri PremiumHigh (160 MB)
+
+Same voice as Apple ships on iOS/macOS. Requires setup due to the 144MB synthesis database:
 
 ```bash
-mkdir -p wasm/voicedata_enu
-cd wasm/voicedata_enu
-for f in sysdct.dat clm.dat synth_med_fxd_bet3f22.dat lid.dat; do
-  curl -LO "https://www.codefactoryglobal.com/downloads/webassembly/voicedata/common/$f"
-done
-curl -LO "https://www.codefactoryglobal.com/downloads/webassembly/voicedata/languages/enu/speech/ve/ve_pipeline_enu_zoe_22_embedded-compact_2-2-1.hdr"
-curl -LO "https://www.codefactoryglobal.com/downloads/webassembly/voicedata/languages/enu/speech/components/enu_zoe_embedded-compact_2-2-1.dat"
+./setup.sh
 ```
 
-### Russian (Yuri, PremiumHigh)
-
-The repo includes all Yuri voice data files except the main synthesis database (144MB).
-To set it up, download the NVDA Vocalizer addon and run the setup script:
-
-1. Get `vocalizer-voice-yuri-PremiumHigh.nvda-addon` and place it in `assets/`
-2. Run: `./setup.sh`
-
-This extracts `synth_yuri_full_vssq5_f22.dat` (144MB) into the voice data directory.
+This downloads the [NVDA Vocalizer Yuri PremiumHigh addon](https://nvda-addons.ru/download.php?file=vocalizer_expressive_voice_yuri_Premium_High) and extracts the voice data.
 
 ### WASM Engine
 
@@ -92,14 +93,14 @@ Key implementation details:
 
 Working:
 - English Zoe (compact quality) - full sentences
-- Russian Yuri (PremiumHigh quality from NVDA addon) - full sentences
+- Russian Yuri (EmbeddedHigh quality) - full sentences
+- Russian Yuri (PremiumHigh quality via `./setup.sh`) - full sentences
 - WAV file output (16-bit PCM, 22050 Hz, mono)
 
 Not yet implemented:
 - Real-time audio playback (via `rodio`/`cpal`)
 - Voice parameter control (speed, pitch, volume)
 - Multiple sequential speak calls
-- Compact Russian voice (encrypted format not supported by this WASM build)
 
 ## License
 
