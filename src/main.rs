@@ -179,13 +179,11 @@ fn asm_const_dispatch(caller: &mut Caller<'_, State>, idx: i32, args: &[i32]) ->
         // [2] Extract mrk/prompt markup — not needed
         2 => 0,
 
-        // [3] In JS, setTimeout INTERRUPTS the current WASM call.
-        //     We simulate this by trapping — the main loop catches it and continues.
+        // [3] In JS, setTimeout yields after the current call returns.
+        //     Set flag; main loop calls _worker_ttsSpeak(0,0) with clean stack.
         3 => {
             caller.data_mut().needs_more_audio = true;
-            // Return a special value that won't be used (the trap below aborts)
-            // We use Err to trigger a wasmtime trap, simulating JS setTimeout yield
-            return -1; // Signal to the asm_const wrapper to trap
+            0
         }
 
         // [4] Set speech params — parse JSON and call ttsSetOneParam* exports
@@ -330,13 +328,15 @@ fn asm_const_dispatch(caller: &mut Caller<'_, State>, idx: i32, args: &[i32]) ->
         10 => 0,
 
         // [11] *** INITIALIZE ASSETS ***
-        //      Load files into WASM heap, mount to /cfdir via MEMFS-style approach,
-        //      then signal init complete.
+        //      In local mode, files are read on-demand via asm_const[14].
+        //      Just signal that assets are ready.
         11 => {
-            eprintln!("[asm_const 11] InitializeAssets");
-            if let Err(e) = load_assets_into_heap(caller) {
-                eprintln!("[asm_const 11] ERROR: {:#}", e);
-                return -1;
+            eprintln!("[asm_const 11] InitializeAssets — signaling ready");
+            let notify = caller
+                .get_export("_asset_manager_notify_init_complete")
+                .and_then(|e| e.into_func());
+            if let Some(func) = notify {
+                func.call(&mut *caller, &[], &mut []).ok();
             }
             0
         }
@@ -1252,7 +1252,8 @@ fn define_imports(linker: &mut Linker<State>, engine: &Engine) -> Result<()> {
                 let idx = params[0].unwrap_i32();
                 let args: Vec<i32> =
                     params[1..].iter().map(|v| v.unwrap_i32()).collect();
-                results[0] = Val::I32(asm_const_dispatch(&mut caller, idx, &args));
+                let ret = asm_const_dispatch(&mut caller, idx, &args);
+                results[0] = Val::I32(ret);
                 Ok(())
             },
         )?;
@@ -1302,8 +1303,8 @@ fn instantiate_module(
     )?;
     linker.define(&mut store, "global", "Infinity", infinity)?;
 
-    // ── Memory (1024 pages = 64 MB) ─────────────────────────────────────
-    let memory = Memory::new(&mut store, MemoryType::new(1024, None))?;
+    // ── Memory (4096 pages = 256 MB — enough for large voice files) ────
+    let memory = Memory::new(&mut store, MemoryType::new(4096, None))?;
     linker.define(&mut store, "env", "memory", memory)?;
     store.data_mut().memory = Some(memory);
 
@@ -1424,10 +1425,10 @@ fn run_tts(store: &mut Store<State>, instance: &Instance, text: &str) -> Result<
         if parts.len() >= 6 {
             let lang = parts[2]; // e.g. "enu" or "rur"
             let voice = parts[3]; // e.g. "zoe" or "yuri"
-            // Capitalize first letter
             let voice_cap = format!("{}{}", &voice[..1].to_uppercase(), &voice[1..]);
-            // vop is everything between voice_rate_ and _version
-            let vop = parts[5..parts.len()-1].join("-");
+            // vop: "embedded-compact" for compact voices, "" for full quality
+            let vop_str = parts[5..parts.len()-1].join("-");
+            let vop = if vop_str.contains("embedded") { vop_str } else { String::new() };
             (lang.to_string(), voice_cap, vop)
         } else {
             ("enu".to_string(), "Zoe".to_string(), "embedded-compact".to_string())
@@ -1492,25 +1493,36 @@ fn run_tts(store: &mut Store<State>, instance: &Instance, text: &str) -> Result<
     store.data_mut().needs_more_audio = false;
     store.data_mut().speak_complete = false;
 
-    // Allocate text on WASM stack (matching JS ccall's allocateUTF8 behavior)
-    let stack_alloc = instance.get_typed_func::<i32, i32>(&mut *store, "stackAlloc")?;
-    let stack_save = instance.get_typed_func::<(), i32>(&mut *store, "stackSave")?;
-    let sp_before = stack_save.call(&mut *store, ())?;
-    let stack_text_ptr = stack_alloc.call(&mut *store, text.len() as i32 + 1)?;
+    // Encode text as UTF-16 LE (the engine's native char type is UTF-16)
+    let utf16: Vec<u16> = text.encode_utf16().collect();
+    let utf16_bytes = utf16.len() * 2 + 2; // +2 for null terminator
+
+    let stack_save_fn = instance.get_typed_func::<(), i32>(&mut *store, "stackSave")?;
+    let stack_alloc_fn = instance.get_typed_func::<i32, i32>(&mut *store, "stackAlloc")?;
+    let stack_restore_fn = instance.get_typed_func::<i32, ()>(&mut *store, "stackRestore")?;
+
+    let sp = stack_save_fn.call(&mut *store, ())?;
+    let text_buf = stack_alloc_fn.call(&mut *store, utf16_bytes as i32)?;
     {
         let mem = store.data().memory.unwrap();
-        mem.write(&mut *store, stack_text_ptr as usize, text.as_bytes())?;
-        mem.write(&mut *store, stack_text_ptr as usize + text.len(), &[0u8])?;
+        let mut bytes = Vec::with_capacity(utf16_bytes);
+        for &c in &utf16 {
+            bytes.extend_from_slice(&c.to_le_bytes());
+        }
+        bytes.extend_from_slice(&[0u8, 0u8]); // UTF-16 null terminator
+        mem.write(&mut *store, text_buf as usize, &bytes)?;
     }
-    eprintln!("[tts] text on stack at {:#x} (sp was {:#x})", stack_text_ptr, sp_before);
+    eprintln!("[tts] speak UTF-16 at {:#x}, {} chars, {} bytes", text_buf, utf16.len(), utf16_bytes);
+    imp_speak.call(&mut *store, (-1, text_buf, 3))?;
+    stack_restore_fn.call(&mut *store, sp)?;
 
-    imp_speak.call(&mut *store, (-1, stack_text_ptr, 3))?;
-
-    // Continuation loop — no stackSave/stackRestore to avoid invalidating engine state
+    // Continuation loop
     let mut iterations = 0;
     let mut no_progress = 0;
     let mut prev_len = store.data().audio_samples.len();
     loop {
+        if !store.data().needs_more_audio { break; }
+        store.data_mut().needs_more_audio = false;
         worker_speak.call(&mut *store, (0, 0))?;
         iterations += 1;
 
