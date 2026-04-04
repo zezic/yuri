@@ -39,7 +39,24 @@ For PremiumHigh quality Yuri (144MB synthesis database), run `./setup.sh` first:
 cargo run --release -- --text "Привет мир" --voice-dir wasm/voicedata_yuri_full -o privet.wav
 ```
 
-Text is passed to the engine as UTF-16 LE (the engine's native character format).
+Speech parameters:
+
+```bash
+# Fast speech
+cargo run --release -- --text "Hello world" --voice-dir wasm/voicedata_enu --speed 200 -o fast.wav
+
+# Slow and deep
+cargo run --release -- --text "Привет мир" --voice-dir wasm/voicedata_yuri_high --speed 60 --pitch 60 -o deep.wav
+
+# High pitched
+cargo run --release -- --text "Привет мир" --voice-dir wasm/voicedata_yuri_high --pitch 180 -o high.wav
+```
+
+| Parameter | Range | Default | Description |
+|-----------|-------|---------|-------------|
+| `--speed` | 50-400 | 100 | Speaking rate (%) |
+| `--pitch` | 50-200 | 100 | Voice pitch (%) |
+| `--volume` | 0-100 | 80 | Output volume |
 
 ## Voices
 
@@ -114,12 +131,13 @@ Working:
 - English Zoe (compact quality) - full sentences
 - Russian Yuri (EmbeddedHigh quality) - full sentences
 - Russian Yuri (PremiumHigh quality via `./setup.sh`) - full sentences
+- Speech parameters: speed (50-400%), pitch (50-200%), volume (0-100)
 - WAV file output (16-bit PCM, 22050 Hz, mono)
 
 Not yet implemented:
 - Real-time audio playback (via `rodio`/`cpal`)
-- Voice parameter control (speed, pitch, volume)
 - Multiple sequential speak calls
+- Inline control sequences (pauses, language switching)
 
 ## License
 

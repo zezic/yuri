@@ -9,7 +9,7 @@ use wasmtime::*;
 #[derive(Parser)]
 #[command(name = "yuri", about = "Local Vocalizer TTS via WASM")]
 struct Cli {
-    /// Text to synthesize (Russian)
+    /// Text to synthesize
     #[arg(short, long)]
     text: String,
 
@@ -24,6 +24,18 @@ struct Cli {
     /// Path to webtts.wasm
     #[arg(long, default_value = "wasm/webtts.wasm")]
     wasm: PathBuf,
+
+    /// Speaking speed (50-400, default 100)
+    #[arg(long, default_value = "100")]
+    speed: i32,
+
+    /// Pitch (50-200, default 100)
+    #[arg(long, default_value = "100")]
+    pitch: i32,
+
+    /// Volume (0-100, default 80)
+    #[arg(long, default_value = "80")]
+    volume: i32,
 }
 
 // ── Emscripten State ────────────────────────────────────────────────────────
@@ -1340,7 +1352,7 @@ fn instantiate_module(
 
 // ── TTS API ─────────────────────────────────────────────────────────────────
 
-fn run_tts(store: &mut Store<State>, instance: &Instance, text: &str) -> Result<()> {
+fn run_tts(store: &mut Store<State>, instance: &Instance, text: &str, speed: i32, pitch: i32, volume: i32) -> Result<()> {
     // 1. Call _main()
     eprintln!("\n=== Calling _main() ===");
     let main_fn = instance.get_typed_func::<(), i32>(&mut *store, "_main")?;
@@ -1455,10 +1467,10 @@ fn run_tts(store: &mut Store<State>, instance: &Instance, text: &str) -> Result<
     eprintln!("[tts] set vop={} → {}", vop, r);
 
     // 8=volume, 9=speed, 10=pitch
-    set_int.call(&mut *store, (8, 80))?;
-    set_int.call(&mut *store, (9, 100))?;
-    set_int.call(&mut *store, (10, 100))?;
-    eprintln!("[tts] speech params: vol=80 speed=100 pitch=100");
+    set_int.call(&mut *store, (8, volume))?;
+    set_int.call(&mut *store, (9, speed))?;
+    set_int.call(&mut *store, (10, pitch))?;
+    eprintln!("[tts] speech params: vol={} speed={} pitch={}", volume, speed, pitch);
 
     // Call _imp_ttsSetSpeechParams(-1, voiceJsonPtr, requestId)
     // This triggers voice loading (opens voice data files via asm_const[14])
@@ -1476,7 +1488,18 @@ fn run_tts(store: &mut Store<State>, instance: &Instance, text: &str) -> Result<
     eprintln!("[tts] _imp_ttsSetSpeechParams(-1, '{}', 2)", voice_json_str);
     set_speech.call(&mut *store, (-1, voice_json_ptr as i32, 2))?;
 
-    // 6. Speak: _imp_ttsSpeak(-1, textPtr, requestId) then _worker_ttsSpeak(0,0) loop
+    // Set speech params AFTER voice selection (voice selection resets them)
+    let params_json = serde_json::json!({
+        "speed": speed,
+        "pitch": pitch,
+        "volume": volume,
+    });
+    let params_json_str = params_json.to_string();
+    let params_json_ptr = alloc_string(store, instance, &params_json_str)?;
+    eprintln!("[tts] setting params: {}", params_json_str);
+    set_speech.call(&mut *store, (-1, params_json_ptr as i32, 4))?;
+
+    // 6. Speak
     eprintln!("\n=== Speaking: \"{}\" ===", text);
     let text_ptr = alloc_string(store, instance, text)?;
 
@@ -1611,7 +1634,7 @@ fn main() -> Result<()> {
     eprintln!("[wasm] instantiated");
 
     // Run TTS
-    run_tts(&mut store, &instance, &cli.text)?;
+    run_tts(&mut store, &instance, &cli.text, cli.speed, cli.pitch, cli.volume)?;
 
     // Write WAV output
     write_wav(&store.data().audio_samples, store.data().sample_rate, &cli.output)?;
