@@ -20,13 +20,15 @@ Voice Data Files         PCM Audio Output
 
 The Rust host implements the Emscripten runtime that the WASM module expects: memory management, syscalls, math functions, and a 25-entry `asm_const` dispatch table that bridges the engine's C code to host-side file I/O, audio capture, and asset management.
 
-## Usage
+## Quick Start
 
 ```bash
-# English (Zoe, compact quality)
+# English works out of the box:
 cargo run --release -- --text "Hello world" --voice-dir wasm/voicedata_enu -o hello.wav
 
-# Russian (Yuri, PremiumHigh quality - same as Apple's Yuri)
+# For Russian Yuri, first set up the voice data:
+# 1. Place vocalizer-voice-yuri-PremiumHigh.nvda-addon in assets/
+# 2. Run: ./setup.sh
 cargo run --release -- --text "Привет мир" --voice-dir wasm/voicedata_yuri_full -o privet.wav
 ```
 
@@ -50,24 +52,17 @@ curl -LO "https://www.codefactoryglobal.com/downloads/webassembly/voicedata/lang
 
 ### Russian (Yuri, PremiumHigh)
 
-Extract from the NVDA Vocalizer addon (rename `.nvda-addon` to `.zip`):
+The repo includes all Yuri voice data files except the main synthesis database (144MB).
+To set it up, download the NVDA Vocalizer addon and run the setup script:
 
-```bash
-mkdir -p wasm/voicedata_yuri_full
-# From the extracted NVDA addon:
-cp rur/speech/components/*.dat wasm/voicedata_yuri_full/
-cp rur/speech/ve/*.hdr wasm/voicedata_yuri_full/
-# Common files from the English demo CDN:
-cp wasm/voicedata_enu/{sysdct,clm,lid,synth_med_fxd_bet3f22}.dat wasm/voicedata_yuri_full/
-```
+1. Get `vocalizer-voice-yuri-PremiumHigh.nvda-addon` and place it in `assets/`
+2. Run: `./setup.sh`
+
+This extracts `synth_yuri_full_vssq5_f22.dat` (144MB) into the voice data directory.
 
 ### WASM Engine
 
-The `webtts.wasm` binary (5.2 MB) is from Code Factory's Vocalizer for WebApps SDK:
-
-```bash
-curl -L "https://codefactoryglobal.com/webassembly/demo/webtts.wasm" -o wasm/webtts.wasm
-```
+The `webtts.wasm` binary (5.2 MB) is included in the repo. Original source: Code Factory's Vocalizer for WebApps SDK demo.
 
 ## Architecture
 

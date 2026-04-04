@@ -1,3 +1,33 @@
 /target
 .DS_Store
+
+# Extracted NVDA addon temp dir
 /extracted
+
+# NVDA addon source file (134MB — user downloads this)
+assets/vocalizer-voice-yuri-PremiumHigh.nvda-addon
+
+# Large voice synthesis database (144MB) — extracted from NVDA addon by setup script
+wasm/voicedata_yuri_full/synth_yuri_full_vssq5_f22.dat
+
+# Downloaded voice zips and temp files
+/tmp
+*.zip
+
+# Test files
+/test_sdk.js
+/test_node.js
+
+# Backup WASM
+wasm/webtts.wasm.bak
+
+# Downloaded but not needed in repo
+wasm/voicedata/
+wasm/voicedata_rur/
+wasm/voicedata_rur_321/
+wasm/voicedata_rur_360/
+wasm/ve_rus_rus_yuri_embedded_compact_3.7.1.zip
+wasm/files.metadata
+wasm/webtts.js
+
+/assets/*
