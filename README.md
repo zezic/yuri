@@ -61,6 +61,25 @@ Same voice as Apple ships on iOS/macOS. Requires setup due to the 144MB synthesi
 
 This downloads the [NVDA Vocalizer Yuri PremiumHigh addon](https://nvda-addons.ru/download.php?file=vocalizer_expressive_voice_yuri_Premium_High) and extracts the voice data.
 
+### Other Russian voices
+
+These Vocalizer Expressive 2 NVDA addons are compatible (unencrypted CLC format). Download, extract the `.dat` and `.hdr` files, and add the common files from `wasm/voicedata_enu/`:
+
+| Voice | Quality | Link |
+|-------|---------|------|
+| Yuri (Male) | EmbeddedPro | [Download](https://nvda-addons.ru/get.php?file=vocalizer_expressive2_voice_Russian_Yuri_EmbeddedPro) |
+| Milena (Female) | EmbeddedHigh | [Download](https://nvda-addons.ru/get.php?file=vocalizer_expressive2_voice_Russian_Milena_EmbeddedHigh) |
+| Milena (Female) | EmbeddedPro | [Download](https://nvda-addons.ru/get.php?file=vocalizer_expressive2_voice_Russian_Milena_EmbeddedPro) |
+| Katya (Female) | EmbeddedPro | [Download](https://nvda-addons.ru/get.php?file=vocalizer_expressive2_voice_Russian_Katya_EmbeddedPro) |
+| Katya ML (Female) | EmbeddedPro | [Download](https://nvda-addons.ru/get.php?file=vocalizer_expressive2_voice_Russian_Katya_ML_EmbeddedPro) |
+
+To use any of these, download the `.nvda-addon` file and run:
+```bash
+./unpack-voice.sh downloaded-addon.nvda-addon
+# Extracts voice data, adds common files, auto-names the output directory
+cargo run --release -- --text "Привет мир" --voice-dir wasm/voicedata_rur-milena -o output.wav
+```
+
 ### WASM Engine
 
 The `webtts.wasm` binary (5.2 MB) is included in the repo. Original source: Code Factory's Vocalizer for WebApps SDK demo.
