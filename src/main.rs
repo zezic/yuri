@@ -9,13 +9,13 @@ use wasmtime::*;
 #[derive(Parser)]
 #[command(name = "yuri", about = "Local Vocalizer TTS via WASM")]
 struct Cli {
-    /// Text to synthesize
+    /// Text to synthesize (reads from stdin if omitted)
     #[arg(short, long)]
-    text: String,
+    text: Option<String>,
 
-    /// Output WAV file path
-    #[arg(short, long, default_value = "output.wav")]
-    output: PathBuf,
+    /// Output WAV file (plays audio directly if omitted)
+    #[arg(short, long)]
+    output: Option<PathBuf>,
 
     /// Path to voice data directory
     #[arg(long, default_value = "wasm/voicedata")]
@@ -1352,7 +1352,7 @@ fn instantiate_module(
 
 // ── TTS API ─────────────────────────────────────────────────────────────────
 
-fn run_tts(store: &mut Store<State>, instance: &Instance, text: &str, speed: i32, pitch: i32, volume: i32) -> Result<()> {
+fn init_tts(store: &mut Store<State>, instance: &Instance, speed: i32, pitch: i32, volume: i32) -> Result<()> {
     // 1. Call _main()
     eprintln!("\n=== Calling _main() ===");
     let main_fn = instance.get_typed_func::<(), i32>(&mut *store, "_main")?;
@@ -1499,26 +1499,22 @@ fn run_tts(store: &mut Store<State>, instance: &Instance, text: &str, speed: i32
     eprintln!("[tts] setting params: {}", params_json_str);
     set_speech.call(&mut *store, (-1, params_json_ptr as i32, 4))?;
 
-    // 6. Speak
-    eprintln!("\n=== Speaking: \"{}\" ===", text);
-    let text_ptr = alloc_string(store, instance, text)?;
+    Ok(())
+}
 
+fn speak_text(store: &mut Store<State>, instance: &Instance, text: &str) -> Result<()> {
     let imp_speak =
         instance.get_typed_func::<(i32, i32, i32), ()>(&mut *store, "_imp_ttsSpeak")?;
     let worker_speak =
         instance.get_typed_func::<(i32, i32), ()>(&mut *store, "_worker_ttsSpeak")?;
 
-    // JS ccall does stackSave/stackRestore around every WASM call.
-    // Without this, the C stack pointer drifts and synthesis corrupts.
-    let stack_save = instance.get_typed_func::<(), i32>(&mut *store, "stackSave")?;
-    let stack_restore = instance.get_typed_func::<i32, ()>(&mut *store, "stackRestore")?;
-
     store.data_mut().needs_more_audio = false;
     store.data_mut().speak_complete = false;
+    store.data_mut().audio_samples.clear();
 
     // Encode text as UTF-16 LE (the engine's native char type is UTF-16)
     let utf16: Vec<u16> = text.encode_utf16().collect();
-    let utf16_bytes = utf16.len() * 2 + 2; // +2 for null terminator
+    let utf16_bytes = utf16.len() * 2 + 2;
 
     let stack_save_fn = instance.get_typed_func::<(), i32>(&mut *store, "stackSave")?;
     let stack_alloc_fn = instance.get_typed_func::<i32, i32>(&mut *store, "stackAlloc")?;
@@ -1611,38 +1607,122 @@ fn write_wav(samples: &[i16], sample_rate: u32, path: &PathBuf) -> Result<()> {
 
 // ── Main ────────────────────────────────────────────────────────────────────
 
+fn play_audio(samples: &[i16], sample_rate: u32) -> Result<()> {
+    use rodio::{buffer::SamplesBuffer, OutputStream, Sink};
+    let (_stream, stream_handle) = OutputStream::try_default()
+        .context("Failed to open audio output device")?;
+    let sink = Sink::try_new(&stream_handle)?;
+    let source = SamplesBuffer::new(1, sample_rate, samples.to_vec());
+    sink.append(source);
+    sink.sleep_until_end();
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    eprintln!("Yuri TTS — loading WASM engine");
-    eprintln!("  wasm:  {}", cli.wasm.display());
-    eprintln!("  voice: {}", cli.voice_dir.display());
-    eprintln!("  text:  \"{}\"", cli.text);
-    eprintln!("  out:   {}", cli.output.display());
-
-    // Load WASM module with larger stack for deep Vocalizer call chains
+    // Load WASM module — use cached precompiled version if available
     let mut config = Config::new();
     config.max_wasm_stack(16 * 1024 * 1024); // 16MB WASM stack
     let engine = Engine::new(&config)?;
-    let module = Module::from_file(&engine, &cli.wasm).context("Failed to load webtts.wasm")?;
-    eprintln!("[wasm] module loaded ({} imports, {} exports)",
-        module.imports().len(), module.exports().len());
 
-    // Instantiate with Emscripten runtime
+    let cache_path = cli.wasm.with_extension("cwasm");
+    let module = if cache_path.exists() {
+        // SAFETY: we trust our own cached file
+        unsafe { Module::deserialize_file(&engine, &cache_path) }
+            .context("Failed to load cached module")?
+    } else {
+        let m = Module::from_file(&engine, &cli.wasm).context("Failed to load webtts.wasm")?;
+        if let Ok(bytes) = m.serialize() {
+            let _ = std::fs::write(&cache_path, bytes);
+            eprintln!("[wasm] compiled and cached to {}", cache_path.display());
+        }
+        m
+    };
+
+    // Instantiate and init TTS engine
     let state = State::new(cli.voice_dir.clone());
     let (mut store, instance) = instantiate_module(&engine, &module, state)?;
-    eprintln!("[wasm] instantiated");
+    init_tts(&mut store, &instance, cli.speed, cli.pitch, cli.volume)?;
 
-    // Run TTS
-    run_tts(&mut store, &instance, &cli.text, cli.speed, cli.pitch, cli.volume)?;
+    // Determine text source and run
+    use std::io::IsTerminal;
 
-    // Write WAV output
-    write_wav(&store.data().audio_samples, store.data().sample_rate, &cli.output)?;
+    if let Some(ref text) = cli.text {
+        // --text flag: single shot
+        speak_and_output(&mut store, &instance, text, &cli)?;
+    } else if !std::io::stdin().is_terminal() {
+        // Piped stdin: read all, speak once
+        use std::io::Read;
+        let mut buf = Vec::new();
+        std::io::stdin().read_to_end(&mut buf)?;
+        let text = String::from_utf8_lossy(&buf);
+        let text = text.trim();
+        if text.is_empty() {
+            bail!("No text provided");
+        }
+        speak_and_output(&mut store, &instance, text, &cli)?;
+    } else {
+        // Interactive: read lines, speak each one
+        use std::io::Read;
+        eprintln!("Interactive mode — type text and press Enter (Ctrl+D to quit)");
+        let stdin = std::io::stdin();
+        let mut buf = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            buf.clear();
+            // Read byte-by-byte until newline or EOF
+            loop {
+                match stdin.lock().read(&mut byte) {
+                    Ok(0) => {
+                        if buf.is_empty() { return Ok(()); }
+                        break;
+                    }
+                    Ok(_) => {
+                        if byte[0] == b'\n' { break; }
+                        buf.push(byte[0]);
+                    }
+                    Err(_) => break,
+                }
+            }
+            // Lossy UTF-8 conversion handles stray backspace bytes
+            let text = String::from_utf8_lossy(&buf);
+            let text = text.trim();
+            if text.is_empty() {
+                continue;
+            }
+            speak_and_output(&mut store, &instance, text, &cli)?;
+        }
+    }
 
-    println!(
-        "Done! {} samples written to {}",
-        store.data().audio_samples.len(),
-        cli.output.display()
-    );
+    Ok(())
+}
+
+fn speak_and_output(
+    store: &mut Store<State>,
+    instance: &Instance,
+    text: &str,
+    cli: &Cli,
+) -> Result<()> {
+    let t0 = std::time::Instant::now();
+    speak_text(store, instance, text)?;
+
+    let samples = &store.data().audio_samples;
+    let sample_rate = store.data().sample_rate;
+    let audio_dur = samples.len() as f64 / sample_rate as f64;
+
+    if samples.is_empty() {
+        eprintln!("Warning: no audio produced for \"{}\"", &text[..text.len().min(30)]);
+        return Ok(());
+    }
+
+    if let Some(ref path) = cli.output {
+        write_wav(samples, sample_rate, path)?;
+    } else {
+        play_audio(samples, sample_rate)?;
+    }
+
+    eprintln!("  {:.0}ms, {:.1}s audio",
+        t0.elapsed().as_secs_f64() * 1000.0, audio_dur);
     Ok(())
 }

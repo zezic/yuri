@@ -25,18 +25,24 @@ The Rust host implements the Emscripten runtime that the WASM module expects: me
 Both voices work out of the box:
 
 ```bash
-# English (Zoe, compact quality)
+# Play directly through speakers
+cargo run --release -- --text "Hello world" --voice-dir wasm/voicedata_enu
+
+# Russian Yuri
+cargo run --release -- --text "Привет мир" --voice-dir wasm/voicedata_yuri_high
+
+# Save to file
 cargo run --release -- --text "Hello world" --voice-dir wasm/voicedata_enu -o hello.wav
 
-# Russian (Yuri, EmbeddedHigh quality)
-cargo run --release -- --text "Привет мир" --voice-dir wasm/voicedata_yuri_high -o privet.wav
+# Read from stdin
+echo "Привет мир" | cargo run --release -- --voice-dir wasm/voicedata_yuri_high
 ```
 
 For PremiumHigh quality Yuri (144MB synthesis database), run `./setup.sh` first:
 
 ```bash
 ./setup.sh  # downloads and extracts the NVDA addon
-cargo run --release -- --text "Привет мир" --voice-dir wasm/voicedata_yuri_full -o privet.wav
+cargo run --release -- --text "Привет мир" --voice-dir wasm/voicedata_yuri_full
 ```
 
 Speech parameters:
@@ -122,6 +128,7 @@ Key implementation details:
 
 - [wasmtime](https://docs.rs/wasmtime) - WebAssembly runtime
 - [hound](https://docs.rs/hound) - WAV file output
+- [rodio](https://docs.rs/rodio) - Audio playback
 - [clap](https://docs.rs/clap) - CLI argument parsing
 - [serde_json](https://docs.rs/serde_json) - JSON handling
 
@@ -132,10 +139,11 @@ Working:
 - Russian Yuri (EmbeddedHigh quality) - full sentences
 - Russian Yuri (PremiumHigh quality via `./setup.sh`) - full sentences
 - Speech parameters: speed (50-400%), pitch (50-200%), volume (0-100)
-- WAV file output (16-bit PCM, 22050 Hz, mono)
+- Direct audio playback (via rodio) or WAV file output
+- Stdin support: pipe text in, hear it spoken
+- Precompiled WASM caching (~50ms startup after first run)
 
 Not yet implemented:
-- Real-time audio playback (via `rodio`/`cpal`)
 - Multiple sequential speak calls
 - Inline control sequences (pauses, language switching)
 

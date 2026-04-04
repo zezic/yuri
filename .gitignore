@@ -31,3 +31,4 @@ wasm/files.metadata
 wasm/webtts.js
 
 /assets/*
+wasm/*.cwasm
