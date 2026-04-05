@@ -1,3 +1,12 @@
+//! Yuri -- offline text-to-speech via a Vocalizer WASM engine.
+//!
+//! # Thread safety
+//!
+//! [`Engine`] is `Send + Sync` and can be shared across threads (e.g. via
+//! `Arc<Engine>`). Each thread should create its own [`Voice`] from the
+//! shared engine. [`Voice`] is **not** `Send` or `Sync` because it owns
+//! mutable WASM instance state.
+
 mod emscripten;
 mod wasm;
 
@@ -17,7 +26,17 @@ flate!(static SYNTH_MED_DAT: [u8] from "wasm/common/synth_med_fxd_bet3f22.dat");
 /// Output sample rate of the TTS engine in Hz.
 pub const SAMPLE_RATE: u32 = 22050;
 
+const WASM_STACK_SIZE: usize = 16 * 1024 * 1024;
+
+fn make_wasmtime_engine() -> Result<wasmtime::Engine> {
+    let mut config = Config::new();
+    config.max_wasm_stack(WASM_STACK_SIZE);
+    Ok(wasmtime::Engine::new(&config)?)
+}
+
 /// Compiled WASM module, shareable across multiple voices.
+///
+/// `Engine` is `Send + Sync` -- it can be shared across threads via `Arc`.
 ///
 /// Create once with [`Engine::new`] (embedded WASM) or [`Engine::from_file`]
 /// (external `.wasm`), then pass to [`Voice::from_dir`] or [`Voice::from_addon`].
@@ -29,11 +48,15 @@ pub struct Engine {
 /// Active TTS voice backed by its own WASM instance.
 ///
 /// Each `Voice` owns isolated WASM state and can synthesize speech independently.
+/// `Voice` is **not** `Send` or `Sync` -- each thread needs its own instance
+/// created from a shared [`Engine`].
+///
 /// Create via [`Voice::from_dir`] or [`Voice::from_addon`].
 pub struct Voice {
     store: Store<State>,
     instance: wasmtime::Instance,
     set_speech: wasmtime::TypedFunc<(i32, i32, i32), ()>,
+    limits: SynthesisLimits,
     _tempdir: Option<tempfile::TempDir>,
 }
 
@@ -41,7 +64,7 @@ pub struct Voice {
 ///
 /// All values are percentages of the default rate. Out-of-range values
 /// are clamped by the engine.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpeechParams {
     /// Speaking speed (50-400, default 100).
     pub speed: i32,
@@ -62,6 +85,7 @@ impl Default for SpeechParams {
 }
 
 /// A chunk of PCM audio samples delivered during streaming synthesis.
+#[derive(Debug, Clone)]
 pub struct AudioChunk {
     /// Signed 16-bit PCM samples, mono.
     pub samples: Vec<i16>,
@@ -70,11 +94,30 @@ pub struct AudioChunk {
 }
 
 /// Events delivered by [`Voice::speak`] during streaming synthesis.
+#[derive(Debug, Clone)]
 pub enum SpeechEvent {
     /// A chunk of audio samples (typically ~90ms of audio).
     Audio(AudioChunk),
     /// Synthesis of the utterance is complete.
     Done,
+}
+
+/// Limits for a single synthesis call, preventing runaway processing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SynthesisLimits {
+    /// Maximum audio duration in seconds (default 300 = 5 minutes).
+    pub max_duration_secs: u32,
+    /// Number of consecutive zero-output iterations before stopping (default 200).
+    pub max_idle_iterations: u32,
+}
+
+impl Default for SynthesisLimits {
+    fn default() -> Self {
+        Self {
+            max_duration_secs: 300,
+            max_idle_iterations: 200,
+        }
+    }
 }
 
 impl Engine {
@@ -83,9 +126,7 @@ impl Engine {
     /// Compiles the WASM from scratch (~5s). Use [`Engine::with_cache`] for fast
     /// subsequent loads.
     pub fn new() -> Result<Self> {
-        let mut config = Config::new();
-        config.max_wasm_stack(16 * 1024 * 1024);
-        let engine = wasmtime::Engine::new(&config)?;
+        let engine = make_wasmtime_engine()?;
 
         let module = Module::new(&engine, &*WEBTTS_WASM)
             .context("Failed to compile embedded WASM module")?;
@@ -98,17 +139,25 @@ impl Engine {
     /// First call compiles and saves (~5s). Subsequent calls load from cache (~2ms).
     /// The cache directory is created if it doesn't exist.
     pub fn with_cache(cache_dir: &Path) -> Result<Self> {
-        let mut config = Config::new();
-        config.max_wasm_stack(16 * 1024 * 1024);
-        let engine = wasmtime::Engine::new(&config)?;
+        let engine = make_wasmtime_engine()?;
 
         std::fs::create_dir_all(cache_dir)
             .with_context(|| format!("Failed to create cache dir: {}", cache_dir.display()))?;
 
         let cache_path = cache_dir.join("webtts.cwasm");
         let module = if cache_path.exists() {
-            unsafe { Module::deserialize_file(&engine, &cache_path) }
-                .context("Failed to load cached module")?
+            match unsafe { Module::deserialize_file(&engine, &cache_path) } {
+                Ok(m) => m,
+                Err(_) => {
+                    let _ = std::fs::remove_file(&cache_path);
+                    let m = Module::new(&engine, &*WEBTTS_WASM)
+                        .context("Failed to compile embedded WASM module")?;
+                    if let Ok(bytes) = m.serialize() {
+                        let _ = std::fs::write(&cache_path, bytes);
+                    }
+                    m
+                }
+            }
         } else {
             let m = Module::new(&engine, &*WEBTTS_WASM)
                 .context("Failed to compile embedded WASM module")?;
@@ -125,14 +174,22 @@ impl Engine {
     ///
     /// Uses a `.cwasm` cache beside the source file for faster subsequent loads.
     pub fn from_file(path: &Path) -> Result<Self> {
-        let mut config = Config::new();
-        config.max_wasm_stack(16 * 1024 * 1024);
-        let engine = wasmtime::Engine::new(&config)?;
+        let engine = make_wasmtime_engine()?;
 
         let cache_path = path.with_extension("cwasm");
         let module = if cache_path.exists() {
-            unsafe { Module::deserialize_file(&engine, &cache_path) }
-                .context("Failed to load cached module")?
+            match unsafe { Module::deserialize_file(&engine, &cache_path) } {
+                Ok(m) => m,
+                Err(_) => {
+                    let _ = std::fs::remove_file(&cache_path);
+                    let m = Module::from_file(&engine, path)
+                        .context("Failed to load WASM file")?;
+                    if let Ok(bytes) = m.serialize() {
+                        let _ = std::fs::write(&cache_path, bytes);
+                    }
+                    m
+                }
+            }
         } else {
             let m = Module::from_file(&engine, path).context("Failed to load WASM file")?;
             if let Ok(bytes) = m.serialize() {
@@ -159,6 +216,7 @@ impl Voice {
             store,
             instance,
             set_speech,
+            limits: SynthesisLimits::default(),
             _tempdir: None,
         })
     }
@@ -177,7 +235,7 @@ impl Voice {
             wasm::instantiate_module(&engine.engine, &engine.module, state)?;
         wasm::init_tts(&mut store, &instance, params.speed, params.pitch, params.volume)?;
         let set_speech = instance.get_typed_func::<(i32, i32, i32), ()>(&mut store, "_imp_ttsSetSpeechParams")?;
-        Ok(Self { store, instance, set_speech, _tempdir: Some(tempdir) })
+        Ok(Self { store, instance, set_speech, limits: SynthesisLimits::default(), _tempdir: Some(tempdir) })
     }
 
     /// Create a voice from an `.nvda-addon` file with persistent cache.
@@ -247,17 +305,27 @@ impl Voice {
         text: &str,
         mut callback: impl FnMut(SpeechEvent) -> Result<()>,
     ) -> Result<()> {
+        let mut cb_err: Option<anyhow::Error> = None;
         wasm::speak_text_streaming(
             &mut self.store,
             &self.instance,
             text,
+            &self.limits,
             &mut |samples: &[i16]| {
-                let _ = callback(SpeechEvent::Audio(AudioChunk {
+                if cb_err.is_some() {
+                    return;
+                }
+                if let Err(e) = callback(SpeechEvent::Audio(AudioChunk {
                     samples: samples.to_vec(),
                     sample_rate: SAMPLE_RATE,
-                }));
+                })) {
+                    cb_err = Some(e);
+                }
             },
         )?;
+        if let Some(e) = cb_err {
+            return Err(e);
+        }
         callback(SpeechEvent::Done)?;
         Ok(())
     }
@@ -269,6 +337,7 @@ impl Voice {
             &mut self.store,
             &self.instance,
             text,
+            &self.limits,
             &mut |samples: &[i16]| {
                 all_samples.extend_from_slice(samples);
             },
@@ -288,6 +357,15 @@ impl Voice {
             emscripten::alloc_string(&mut self.store, &self.instance, &params_json_str)?;
         self.set_speech
             .call(&mut self.store, (-1, params_json_ptr as i32, 4))?;
+
+        // Free the allocated string to prevent WASM heap leak
+        let free_fn = self.instance.get_typed_func::<i32, ()>(&mut self.store, "_free")?;
+        free_fn.call(&mut self.store, params_json_ptr as i32)?;
         Ok(())
+    }
+
+    /// Override synthesis limits (max duration, idle iterations).
+    pub fn set_limits(&mut self, limits: SynthesisLimits) {
+        self.limits = limits;
     }
 }

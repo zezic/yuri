@@ -13,7 +13,6 @@ pub(crate) struct State {
     pub(crate) temp_ret: i32,
     pub(crate) init_complete: bool,
     pub(crate) needs_more_audio: bool,
-    pub(crate) speak_complete: bool,
     pub(crate) memory: Option<Memory>,
 }
 
@@ -33,12 +32,17 @@ impl State {
             temp_ret: 0,
             init_complete: false,
             needs_more_audio: false,
-            speak_complete: false,
             memory: None,
         }
     }
 }
 
+/// Returns the WASM linear memory.
+///
+/// # Safety invariant
+/// `memory` is always `Some` after `instantiate_module` sets it during WASM
+/// instantiation. Every caller of `get_memory` runs inside a WASM callback
+/// that can only fire after instantiation, so the unwrap is safe.
 pub(crate) fn get_memory(caller: &mut Caller<'_, State>) -> Memory {
     caller.data().memory.unwrap()
 }
@@ -49,19 +53,22 @@ pub(crate) fn read_cstring(memory: &Memory, store: &impl AsContext<Data = State>
     while end < data.len() && data[end] != 0 {
         end += 1;
     }
-    String::from_utf8_lossy(&data[ptr as usize..end]).to_string()
+    String::from_utf8_lossy(&data[ptr as usize..end]).into_owned()
 }
 
 pub(crate) fn read_i32(memory: &Memory, store: &impl AsContext<Data = State>, addr: u32) -> i32 {
     let data = memory.data(store);
     let off = addr as usize;
+    if off + 3 >= data.len() {
+        return 0;
+    }
     i32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
 }
 
 pub(crate) fn write_i32(memory: &Memory, store: &mut impl AsContextMut<Data = State>, addr: u32, val: i32) {
     memory
         .write(store, addr as usize, &val.to_le_bytes())
-        .unwrap();
+        .ok();
 }
 
 /// Write a null-terminated UTF-8 string into WASM memory via `_malloc`.
@@ -116,8 +123,8 @@ pub(crate) fn asm_const_dispatch(caller: &mut Caller<'_, State>, idx: i32, args:
                 });
                 let json = config.to_string();
                 let max_write = json.len().min(4000);
-                mem.write(&mut *caller, ptr as usize, &json.as_bytes()[..max_write]).unwrap();
-                mem.write(&mut *caller, ptr as usize + max_write, &[0u8]).unwrap();
+                mem.write(&mut *caller, ptr as usize, &json.as_bytes()[..max_write]).ok();
+                mem.write(&mut *caller, ptr as usize + max_write, &[0u8]).ok();
             }
             64 * 1024 * 1024
         }
@@ -209,18 +216,20 @@ pub(crate) fn asm_const_dispatch(caller: &mut Caller<'_, State>, idx: i32, args:
             if num_samples > 0 {
                 let mem = get_memory(caller);
                 let data = mem.data(&*caller);
-                let samples: Vec<i16> = (0..num_samples)
-                    .map(|i| {
-                        let off = buf_byte_ptr + i * 2;
-                        i16::from_le_bytes([data[off], data[off + 1]])
-                    })
-                    .collect();
+                let end = buf_byte_ptr + num_samples * 2;
+                if end <= data.len() {
+                    let samples: Vec<i16> = (0..num_samples)
+                        .map(|i| {
+                            let off = buf_byte_ptr + i * 2;
+                            i16::from_le_bytes([data[off], data[off + 1]])
+                        })
+                        .collect();
 
-                caller.data_mut().pending_samples.extend_from_slice(&samples);
+                    caller.data_mut().pending_samples.extend_from_slice(&samples);
+                }
             }
 
             if complete_code == 1 {
-                caller.data_mut().speak_complete = true;
                 caller.data_mut().needs_more_audio = false;
             }
             0
@@ -318,7 +327,7 @@ pub(crate) fn asm_const_dispatch(caller: &mut Caller<'_, State>, idx: i32, args:
 
             if let Some(data) = file_data {
                 let mem = get_memory(caller);
-                mem.write(&mut *caller, buf_ptr as usize, &data).unwrap();
+                mem.write(&mut *caller, buf_ptr as usize, &data).ok();
                 data.len() as i32
             } else {
                 0
@@ -393,8 +402,8 @@ pub(crate) fn asm_const_dispatch(caller: &mut Caller<'_, State>, idx: i32, args:
             if out_ptr != 0 && out_size > 0 {
                 let bytes = local_path.as_bytes();
                 let write_len = bytes.len().min(out_size - 1);
-                mem.write(&mut *caller, out_ptr as usize, &bytes[..write_len]).unwrap();
-                mem.write(&mut *caller, out_ptr as usize + write_len, &[0u8]).unwrap();
+                mem.write(&mut *caller, out_ptr as usize, &bytes[..write_len]).ok();
+                mem.write(&mut *caller, out_ptr as usize + write_len, &[0u8]).ok();
             }
             0
         }
@@ -571,7 +580,7 @@ pub(crate) fn define_imports(linker: &mut Linker<State>, engine: &wasmtime::Engi
         |mut caller: Caller<'_, State>, dest: i32, src: i32, num: i32| -> i32 {
             let mem = get_memory(&mut caller);
             let data = mem.data(&caller)[src as usize..(src + num) as usize].to_vec();
-            mem.write(&mut caller, dest as usize, &data).unwrap();
+            mem.write(&mut caller, dest as usize, &data).ok();
             dest
         },
     )?;
@@ -641,25 +650,31 @@ pub(crate) fn define_imports(linker: &mut Linker<State>, engine: &wasmtime::Engi
                 return 0;
             }
 
-            let malloc_fn = caller
+            let malloc_fn = match caller
                 .get_export("_malloc")
                 .and_then(|e| e.into_func())
-                .unwrap();
+            {
+                Some(f) => f,
+                None => return 0,
+            };
             let mut results = [Val::I32(0)];
-            malloc_fn
+            if malloc_fn
                 .call(
                     &mut caller,
                     &[Val::I32(hdr_content.len() as i32 + 1)],
                     &mut results,
                 )
-                .unwrap();
+                .is_err()
+            {
+                return 0;
+            }
             let ptr = results[0].unwrap_i32();
 
             let mem = get_memory(&mut caller);
             mem.write(&mut caller, ptr as usize, hdr_content.as_bytes())
-                .unwrap();
+                .ok();
             mem.write(&mut caller, ptr as usize + hdr_content.len(), &[0u8])
-                .unwrap();
+                .ok();
 
             ptr
         },
@@ -760,7 +775,7 @@ pub(crate) fn define_imports(linker: &mut Linker<State>, engine: &wasmtime::Engi
 
             if let Some(data) = chunk {
                 let mem = get_memory(&mut caller);
-                mem.write(&mut caller, buf as usize, &data).unwrap();
+                mem.write(&mut caller, buf as usize, &data).ok();
                 data.len() as i32
             } else {
                 -1
@@ -847,7 +862,7 @@ pub(crate) fn define_imports(linker: &mut Linker<State>, engine: &wasmtime::Engi
 
                 if let Some(data) = chunk {
                     let mem = get_memory(&mut caller);
-                    mem.write(&mut caller, base as usize, &data).unwrap();
+                    mem.write(&mut caller, base as usize, &data).ok();
                     total += data.len() as i32;
                 }
             }
@@ -869,7 +884,7 @@ pub(crate) fn define_imports(linker: &mut Linker<State>, engine: &wasmtime::Engi
             if trimmed == "/cfdir" || trimmed.is_empty() {
                 let mem = get_memory(&mut caller);
                 let zeros = [0u8; 96];
-                mem.write(&mut caller, buf_ptr as usize, &zeros).unwrap();
+                mem.write(&mut caller, buf_ptr as usize, &zeros).ok();
                 // st_mode = directory (S_IFDIR | 0755)
                 write_i32(&mem, &mut caller, buf_ptr + 8, 0o40755);
                 return 0;
@@ -890,7 +905,7 @@ pub(crate) fn define_imports(linker: &mut Linker<State>, engine: &wasmtime::Engi
                 Ok(meta) => {
                     let mem = get_memory(&mut caller);
                     let zeros = [0u8; 96];
-                    mem.write(&mut caller, buf_ptr as usize, &zeros).unwrap();
+                    mem.write(&mut caller, buf_ptr as usize, &zeros).ok();
                     write_i32(&mem, &mut caller, buf_ptr + 40, meta.len() as i32);
                     write_i32(&mem, &mut caller, buf_ptr + 8, 0o100644);
                     0
@@ -942,17 +957,17 @@ pub(crate) fn define_imports(linker: &mut Linker<State>, engine: &wasmtime::Engi
                 let mem = get_memory(&mut caller);
                 let base = dirp as usize + offset;
                 let zeros = [0u8; REC_LEN];
-                mem.write(&mut caller, base, &zeros).unwrap();
-                mem.write(&mut caller, base, &(i as u64 + 1).to_le_bytes()).unwrap();
+                mem.write(&mut caller, base, &zeros).ok();
+                mem.write(&mut caller, base, &(i as u64 + 1).to_le_bytes()).ok();
                 mem.write(&mut caller, base + 8, &((i + 1) as u64).to_le_bytes())
-                    .unwrap();
+                    .ok();
                 mem.write(&mut caller, base + 16, &(REC_LEN as u16).to_le_bytes())
-                    .unwrap();
+                    .ok();
                 let d_type: u8 = if name == "." || name == ".." { 4 } else { 8 };
-                mem.write(&mut caller, base + 18, &[d_type]).unwrap();
+                mem.write(&mut caller, base + 18, &[d_type]).ok();
                 let name_bytes = name.as_bytes();
                 let name_len = name_bytes.len().min(255);
-                mem.write(&mut caller, base + 19, &name_bytes[..name_len]).unwrap();
+                mem.write(&mut caller, base + 19, &name_bytes[..name_len]).ok();
 
                 offset += REC_LEN;
                 entries_written += 1;

@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use wasmtime::*;
 
 use crate::emscripten::{alloc_string, define_imports, write_i32, State};
+use crate::SynthesisLimits;
 
 pub(crate) fn instantiate_module(
     engine: &Engine,
@@ -194,6 +195,15 @@ pub(crate) fn init_tts(
     let params_json_ptr = alloc_string(store, instance, &params_json_str)?;
     set_speech.call(&mut *store, (-1, params_json_ptr as i32, 4))?;
 
+    // Free all malloc'd strings to prevent WASM heap leaks
+    let free_fn = instance.get_typed_func::<i32, ()>(&mut *store, "_free")?;
+    free_fn.call(&mut *store, params_ptr as i32)?;
+    free_fn.call(&mut *store, lang_ptr as i32)?;
+    free_fn.call(&mut *store, name_ptr as i32)?;
+    free_fn.call(&mut *store, vop_ptr as i32)?;
+    free_fn.call(&mut *store, voice_json_ptr as i32)?;
+    free_fn.call(&mut *store, params_json_ptr as i32)?;
+
     Ok(())
 }
 
@@ -201,6 +211,7 @@ pub(crate) fn speak_text_streaming(
     store: &mut Store<State>,
     instance: &Instance,
     text: &str,
+    limits: &SynthesisLimits,
     on_samples: &mut dyn FnMut(&[i16]),
 ) -> Result<()> {
     let imp_speak =
@@ -209,7 +220,6 @@ pub(crate) fn speak_text_streaming(
         instance.get_typed_func::<(i32, i32), ()>(&mut *store, "_worker_ttsSpeak")?;
 
     store.data_mut().needs_more_audio = false;
-    store.data_mut().speak_complete = false;
     store.data_mut().pending_samples.clear();
 
     // Encode text as UTF-16 LE (the engine's native encoding)
@@ -234,23 +244,24 @@ pub(crate) fn speak_text_streaming(
     imp_speak.call(&mut *store, (-1, text_buf, 3))?;
     stack_restore_fn.call(&mut *store, sp)?;
 
+    let max_samples = limits.max_duration_secs as usize * crate::SAMPLE_RATE as usize;
+    let max_idle = limits.max_idle_iterations;
+
     // Drain samples produced by the initial _imp_ttsSpeak call
-    let initial: Vec<i16> = store.data_mut().pending_samples.drain(..).collect();
+    let initial = std::mem::take(&mut store.data_mut().pending_samples);
     if !initial.is_empty() {
         on_samples(&initial);
     }
 
     // Continuation loop
-    let mut iterations = 0;
-    let mut no_progress = 0;
+    let mut no_progress: u32 = 0;
     let mut total_samples: usize = initial.len();
     loop {
         if !store.data().needs_more_audio { break; }
         store.data_mut().needs_more_audio = false;
         worker_speak.call(&mut *store, (0, 0))?;
-        iterations += 1;
 
-        let chunk: Vec<i16> = store.data_mut().pending_samples.drain(..).collect();
+        let chunk = std::mem::take(&mut store.data_mut().pending_samples);
         if !chunk.is_empty() {
             total_samples += chunk.len();
             on_samples(&chunk);
@@ -259,15 +270,13 @@ pub(crate) fn speak_text_streaming(
             no_progress += 1;
         }
 
-        if no_progress >= 200 || iterations >= 5000
-            || (total_samples as u32) >= 60 * 22050
-        {
+        if no_progress >= max_idle || total_samples >= max_samples {
             break;
         }
     }
 
     // Drain any remaining samples
-    let remaining: Vec<i16> = store.data_mut().pending_samples.drain(..).collect();
+    let remaining = std::mem::take(&mut store.data_mut().pending_samples);
     if !remaining.is_empty() {
         on_samples(&remaining);
     }
