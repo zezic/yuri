@@ -21,3 +21,6 @@ wasm/*.zip
 /test_sdk.js
 /test_node.js
 *.wav
+
+/.claude
+*.sh
