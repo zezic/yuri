@@ -85,6 +85,43 @@ voice.speak_to_device("Fast speech")?;
 | `pitch` | 50–200 | 100 |
 | `volume` | 0–100 | 80 |
 
+### Inline control sequences
+
+Control pitch, speed, volume, and pauses mid-sentence:
+
+```rust
+use yuri::control;
+
+let text = format!(
+    "Normal voice {} now high pitched {} now low {} back to normal",
+    control::pitch(180), control::pitch(50), control::reset()
+);
+voice.speak_to_device(&text)?;
+```
+
+Available sequences:
+
+| Function | Effect |
+|----------|--------|
+| `control::pause(ms)` | Insert silence (1–65535 ms) |
+| `control::rate(pct)` | Change speed mid-text (50–400%) |
+| `control::pitch(pct)` | Change pitch mid-text (50–200%) |
+| `control::volume(lvl)` | Change volume mid-text (0–100) |
+| `control::reset()` | Reset all params to defaults |
+
+In the CLI, use backslash sequences directly:
+
+```bash
+# Pause between words
+yuri --text 'Hello \pause=800\ world' --addon voice.nvda-addon
+
+# Pitch changes mid-phrase
+yuri --text 'Normal \pitch=180\ high \pitch=50\ low \rst\ normal' --addon voice.nvda-addon
+
+# Speed up mid-sentence
+yuri --text 'Regular speed \rate=250\ now fast \rst\ regular again' --addon voice.nvda-addon
+```
+
 See [`examples/`](examples/) for complete runnable examples.
 
 ## CLI usage

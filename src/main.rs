@@ -75,6 +75,20 @@ fn write_wav(samples: &[i16], sample_rate: u32, path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
+/// Process backslash-escaped control sequences in text for CLI convenience.
+/// Converts `\pause=500\` to `\x1B\pause=500\` etc.
+fn process_escapes(text: &str) -> String {
+    let sequences = [
+        "\\pause=", "\\rate=", "\\pitch=", "\\vol=", "\\voice=",
+        "\\lang=", "\\readmode=", "\\mrk=", "\\rst\\",
+    ];
+    let mut result = text.to_string();
+    for seq in &sequences {
+        result = result.replace(seq, &format!("\x1B{seq}"));
+    }
+    result
+}
+
 fn speak_and_output(voice: &mut yuri::Voice, text: &str, cli: &Cli) -> Result<()> {
     let t0 = std::time::Instant::now();
 
@@ -139,17 +153,18 @@ fn main() -> Result<()> {
     use std::io::IsTerminal;
 
     if let Some(ref text) = cli.text {
-        speak_and_output(&mut voice, text, &cli)?;
+        let text = process_escapes(text);
+        speak_and_output(&mut voice, &text, &cli)?;
     } else if !std::io::stdin().is_terminal() {
         use std::io::Read;
         let mut buf = Vec::new();
         std::io::stdin().read_to_end(&mut buf)?;
-        let text = String::from_utf8_lossy(&buf);
-        let text = text.trim();
+        let text = String::from_utf8_lossy(&buf).into_owned();
+        let text = process_escapes(text.trim());
         if text.is_empty() {
             bail!("No text provided");
         }
-        speak_and_output(&mut voice, text, &cli)?;
+        speak_and_output(&mut voice, &text, &cli)?;
     } else {
         use std::io::Read;
         eprintln!("Interactive mode -- type text and press Enter (Ctrl+D to quit)");
@@ -171,12 +186,12 @@ fn main() -> Result<()> {
                     Err(_) => break,
                 }
             }
-            let text = String::from_utf8_lossy(&buf);
-            let text = text.trim();
+            let text = String::from_utf8_lossy(&buf).into_owned();
+            let text = process_escapes(text.trim());
             if text.is_empty() {
                 continue;
             }
-            speak_and_output(&mut voice, text, &cli)?;
+            speak_and_output(&mut voice, &text, &cli)?;
         }
     }
 

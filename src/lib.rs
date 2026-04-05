@@ -84,6 +84,68 @@ impl Default for SpeechParams {
     }
 }
 
+/// Inline control sequences that can be embedded in text.
+///
+/// The Vocalizer engine supports escape sequences prefixed with `\x1B\` (ESC + backslash)
+/// that control synthesis mid-text. Embed them directly in the text passed to
+/// [`Voice::speak`] or [`Voice::synthesize`].
+///
+/// # Examples
+///
+/// ```text
+/// "Hello \x1B\\pause=500\\ world"          — 500ms pause between words
+/// "Say it \x1B\\rate=200\\ fast"            — speed up mid-sentence
+/// "Normal \x1B\\pitch=150\\ high pitch"     — raise pitch
+/// "Volume \x1B\\vol=30\\ quiet now"         — lower volume
+/// "\x1B\\voice=Milena\\ Привет"             — switch voice mid-text
+/// "Read this \x1B\\readmode=char\\ A B C"   — spell out characters
+/// "Bookmark \x1B\\mrk=here\\ text"          — insert a named bookmark
+/// "\x1B\\rst\\ back to defaults"            — reset all params
+/// ```
+///
+/// # Available sequences
+///
+/// | Sequence | Values | Description |
+/// |----------|--------|-------------|
+/// | `\pause=N` | 1–65535 (ms) | Insert silence |
+/// | `\rate=N` | 50–400 | Speaking speed |
+/// | `\pitch=N` | 50–200 | Voice pitch |
+/// | `\vol=N` | 0–100 | Volume |
+/// | `\voice=NAME` | voice name | Switch voice |
+/// | `\lang=CODE` | language code | Switch language |
+/// | `\readmode=MODE` | sent, char, word, line | Reading mode |
+/// | `\mrk=NAME` | string | Bookmark (fires callback) |
+/// | `\rst` | — | Reset to defaults |
+pub mod control {
+    /// Escape character that prefixes all inline control sequences.
+    pub const ESC: &str = "\x1B";
+
+    /// Insert a pause of `ms` milliseconds.
+    pub fn pause(ms: u32) -> String {
+        format!("\x1B\\pause={ms}\\")
+    }
+
+    /// Set speaking rate (50–400%).
+    pub fn rate(percent: u32) -> String {
+        format!("\x1B\\rate={percent}\\")
+    }
+
+    /// Set pitch (50–200%).
+    pub fn pitch(percent: u32) -> String {
+        format!("\x1B\\pitch={percent}\\")
+    }
+
+    /// Set volume (0–100).
+    pub fn volume(level: u32) -> String {
+        format!("\x1B\\vol={level}\\")
+    }
+
+    /// Reset all parameters to defaults.
+    pub fn reset() -> String {
+        "\x1B\\rst\\".to_string()
+    }
+}
+
 /// A chunk of PCM audio samples delivered during streaming synthesis.
 #[derive(Debug, Clone)]
 pub struct AudioChunk {
@@ -387,6 +449,20 @@ impl Voice {
         })?;
 
         sink.sleep_until_end();
+        Ok(())
+    }
+
+    /// Stop any ongoing synthesis and clear the audio pipeline.
+    ///
+    /// Safe to call at any time. If no synthesis is in progress, this is a no-op.
+    pub fn stop(&mut self) -> Result<()> {
+        let stop_fn = self.instance.get_typed_func::<(i32, i32), ()>(
+            &mut self.store,
+            "_imp_ttsStop",
+        )?;
+        stop_fn.call(&mut self.store, (-1, 0))?;
+        self.store.data_mut().pending_samples.clear();
+        self.store.data_mut().needs_more_audio = false;
         Ok(())
     }
 
