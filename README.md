@@ -1,61 +1,61 @@
-# Yuri - Local Vocalizer TTS via WASM
+# Yuri — Local Vocalizer TTS via WASM
 
 Run the Nuance Vocalizer Expressive TTS engine locally on any platform using a standalone WASM runtime. No browser required.
 
 This is the same engine behind Apple's built-in "Yuri" voice on iOS/macOS, NVDA screen reader voices, and Code Factory's Vocalizer apps.
 
-## How it works
+## Library usage
 
+Add the crate and provide a voice file — everything else is embedded:
+
+```rust
+let engine = yuri::Engine::new()?;
+let mut voice = yuri::Voice::from_addon(&engine, "yuri.nvda-addon", Default::default())?;
+
+// Streaming: receive audio chunks as they're produced (~90ms each)
+voice.speak("Привет мир", |event| {
+    match event {
+        yuri::SpeechEvent::Audio(chunk) => play(&chunk.samples),
+        yuri::SpeechEvent::Done => {},
+    }
+    Ok(())
+})?;
+
+// Or collect all audio at once
+let samples: Vec<i16> = voice.synthesize("Hello world")?;
 ```
-Rust Host (Wasmtime) --> webtts.wasm (Emscripten/Vocalizer)
-     |                        |
-     | 49 Emscripten imports  | Nuance Vocalizer Embedded
-     | asm_const dispatch     | compiled to WebAssembly
-     | file I/O bridge        | by Code Factory
-     |                        |
-     v                        v
-Voice Data Files         PCM Audio Output
-(CLC format)             (16-bit, 22050 Hz)
-```
 
-The Rust host implements the Emscripten runtime that the WASM module expects: memory management, syscalls, math functions, and a 25-entry `asm_const` dispatch table that bridges the engine's C code to host-side file I/O, audio capture, and asset management.
+The WASM engine and common voice data files are compressed and embedded in the library. Users only need an `.nvda-addon` voice file.
 
-## Quick Start
+Audio format: 16-bit PCM, 22050 Hz, mono.
 
-Both voices work out of the box:
+## CLI usage
 
 ```bash
 # Play directly through speakers
 cargo run --release -- --text "Hello world" --voice-dir wasm/voicedata_enu
 
-# Russian Yuri
+# Russian Yuri (included in repo)
 cargo run --release -- --text "Привет мир" --voice-dir wasm/voicedata_yuri_high
+
+# Load voice from an .nvda-addon file
+cargo run --release -- --text "Привет мир" --addon yuri.nvda-addon
 
 # Save to file
 cargo run --release -- --text "Hello world" --voice-dir wasm/voicedata_enu -o hello.wav
 
 # Read from stdin
 echo "Привет мир" | cargo run --release -- --voice-dir wasm/voicedata_yuri_high
+
+# Interactive mode (type lines, press Enter to hear them)
+cargo run --release -- --voice-dir wasm/voicedata_yuri_high
 ```
 
-For PremiumHigh quality Yuri (144MB synthesis database), run `./setup.sh` first:
+### Speech parameters
 
 ```bash
-./setup.sh  # downloads and extracts the NVDA addon
-cargo run --release -- --text "Привет мир" --voice-dir wasm/voicedata_yuri_full
-```
-
-Speech parameters:
-
-```bash
-# Fast speech
-cargo run --release -- --text "Hello world" --voice-dir wasm/voicedata_enu --speed 200 -o fast.wav
-
-# Slow and deep
-cargo run --release -- --text "Привет мир" --voice-dir wasm/voicedata_yuri_high --speed 60 --pitch 60 -o deep.wav
-
-# High pitched
-cargo run --release -- --text "Привет мир" --voice-dir wasm/voicedata_yuri_high --pitch 180 -o high.wav
+cargo run --release -- --text "Hello" --voice-dir wasm/voicedata_enu --speed 200
+cargo run --release -- --text "Hello" --voice-dir wasm/voicedata_enu --pitch 60
 ```
 
 | Parameter | Range | Default | Description |
@@ -66,27 +66,24 @@ cargo run --release -- --text "Привет мир" --voice-dir wasm/voicedata_y
 
 ## Voices
 
-### English - Zoe (compact, 19 MB)
+### Included in repo
 
-Included in repo. Voice data from the Code Factory WebApps SDK demo CDN.
+**English — Zoe** (compact, 19 MB). Voice data from the Code Factory WebApps SDK demo CDN.
 
-### Russian - Yuri EmbeddedHigh (55 MB)
+**Russian — Yuri EmbeddedHigh** (55 MB). From the [Vocalizer Expressive 2 NVDA addon](https://nvda-addons.ru/get.php?file=vocalizer_expressive2_voice_Russian_Yuri_EmbeddedHigh).
 
-Included in repo. Single-file embedded voice from the [Vocalizer Expressive 2 NVDA addon](https://nvda-addons.ru/get.php?file=vocalizer_expressive2_voice_Russian_Yuri_EmbeddedHigh).
+### Optional: Yuri PremiumHigh (160 MB)
 
-### Russian - Yuri PremiumHigh (160 MB)
-
-Same voice as Apple ships on iOS/macOS. Requires setup due to the 144MB synthesis database:
+Same voice Apple ships on iOS/macOS. Run `./setup.sh` to download and extract:
 
 ```bash
 ./setup.sh
+cargo run --release -- --text "Привет мир" --voice-dir wasm/voicedata_yuri_full
 ```
 
-This downloads the [NVDA Vocalizer Yuri PremiumHigh addon](https://nvda-addons.ru/download.php?file=vocalizer_expressive_voice_yuri_Premium_High) and extracts the voice data.
+### Other compatible voices
 
-### Other Russian voices
-
-These Vocalizer Expressive 2 NVDA addons are compatible (unencrypted CLC format). Download, extract the `.dat` and `.hdr` files, and add the common files from `wasm/voicedata_enu/`:
+These Vocalizer Expressive 2 NVDA addons work with `--addon` or `./unpack-voice.sh`:
 
 | Voice | Quality | Link |
 |-------|---------|------|
@@ -96,56 +93,50 @@ These Vocalizer Expressive 2 NVDA addons are compatible (unencrypted CLC format)
 | Katya (Female) | EmbeddedPro | [Download](https://nvda-addons.ru/get.php?file=vocalizer_expressive2_voice_Russian_Katya_EmbeddedPro) |
 | Katya ML (Female) | EmbeddedPro | [Download](https://nvda-addons.ru/get.php?file=vocalizer_expressive2_voice_Russian_Katya_ML_EmbeddedPro) |
 
-To use any of these, download the `.nvda-addon` file and run:
+To use with `--addon`:
 ```bash
-./unpack-voice.sh downloaded-addon.nvda-addon
-# Extracts voice data, adds common files, auto-names the output directory
-cargo run --release -- --text "Привет мир" --voice-dir wasm/voicedata_rur-milena -o output.wav
+cargo run --release -- --text "Привет" --addon downloaded-addon.nvda-addon
 ```
 
-### WASM Engine
+To extract for `--voice-dir`:
+```bash
+./unpack-voice.sh downloaded-addon.nvda-addon
+cargo run --release -- --text "Привет" --voice-dir wasm/voicedata_rur-milena
+```
 
-The `webtts.wasm` binary (5.2 MB) is included in the repo. Original source: Code Factory's Vocalizer for WebApps SDK demo.
+## How it works
 
-## Architecture
-
-The host implements these Emscripten interfaces:
-
-- **49 import functions**: math (`sin`, `cos`, `exp`, `log`, `pow`), memory (`sbrk`, `resize_heap`, `memcpy_big`), syscalls (`open`, `read`, `close`, `lseek`, `writev`, `stat`, `getdents`), threading stubs, time functions, and the `_emscripten_asm_const_*` dispatch family
-- **25 asm_const entries**: config parsing `[0]`, asset management `[11,19,20]`, file I/O `[14-18]`, audio output `[7]`, synthesis continuation `[3]`, speech params `[4]`, voice lookup `[21]`, completion callbacks `[5,8]`, and event forwarding `[6,9,10]`
-- **Voice file serving**: local file access via `asm_const[14]` (open), `[16]` (read), `[17]` (seek), `[18]` (size), mapped through `asm_const[21]` path resolution
+The Rust host loads `webtts.wasm` (a Nuance Vocalizer engine compiled to WebAssembly by Code Factory) via Wasmtime, and implements the Emscripten runtime it expects: 49 import functions and a 25-entry `asm_const` dispatch table bridging the engine's C code to host-side file I/O and audio capture.
 
 Key implementation details:
-- Text must be encoded as **UTF-16 LE** (the engine's native `wchar_t` format)
-- Initialization uses `_imp_ttsInitialize(-1, paramsJsonPtr, requestId)` with `data: "local"` mode
-- Voice selection via `_imp_ttsSetSpeechParams(-1, voiceJsonPtr, requestId)`
-- Synthesis via `_imp_ttsSpeak(-1, utf16TextPtr, requestId)` followed by `_worker_ttsSpeak(0, 0)` continuation loop
-- The continuation loop must run with a **clean WASM stack** (no recursion from `asm_const[3]`)
-- Pipeline headers are returned as file **content** (not filenames) via `_getLocalPipelineHeaders`
-- WASM stack size must be at least 16 MB (`Config::max_wasm_stack`)
+- Text is encoded as UTF-16 LE (the engine's native `wchar_t` format)
+- Synthesis uses `_imp_ttsSpeak` + `_worker_ttsSpeak(0, 0)` continuation loop
+- Each continuation must run with a clean WASM stack (no recursion from `asm_const[3]`)
+- Pipeline headers are returned as file content via `_getLocalPipelineHeaders`
+- WASM module is precompiled and cached (~5s first run, ~2ms after)
+
+## Performance
+
+With cached WASM module (after first run):
+
+| Voice | Synth time | Audio | Realtime factor |
+|-------|-----------|-------|-----------------|
+| English Zoe (compact) | ~10ms | 1.4s | 28x |
+| Yuri EmbeddedHigh | ~10ms | 1.9s | 28x |
+| Yuri PremiumHigh | ~140ms | 1.9s | 14x |
 
 ## Dependencies
 
-- [wasmtime](https://docs.rs/wasmtime) - WebAssembly runtime
-- [hound](https://docs.rs/hound) - WAV file output
-- [rodio](https://docs.rs/rodio) - Audio playback
-- [clap](https://docs.rs/clap) - CLI argument parsing
-- [serde_json](https://docs.rs/serde_json) - JSON handling
+Library (always linked):
+- [wasmtime](https://docs.rs/wasmtime) — WebAssembly runtime
+- [include-flate](https://docs.rs/include-flate) — embedded compressed assets
+- [zip](https://docs.rs/zip) — .nvda-addon extraction
+- [tempfile](https://docs.rs/tempfile) — temporary voice data directories
 
-## Status
-
-Working:
-- English Zoe (compact quality) - full sentences
-- Russian Yuri (EmbeddedHigh quality) - full sentences
-- Russian Yuri (PremiumHigh quality via `./setup.sh`) - full sentences
-- Speech parameters: speed (50-400%), pitch (50-200%), volume (0-100)
-- Direct audio playback (via rodio) or WAV file output
-- Stdin support: pipe text in, hear it spoken
-- Precompiled WASM caching (~50ms startup after first run)
-
-Not yet implemented:
-- Multiple sequential speak calls
-- Inline control sequences (pauses, language switching)
+CLI only (behind `cli` feature, default on):
+- [clap](https://docs.rs/clap) — argument parsing
+- [hound](https://docs.rs/hound) — WAV file output
+- [rodio](https://docs.rs/rodio) — audio playback
 
 ## License
 
