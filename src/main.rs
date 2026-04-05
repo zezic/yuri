@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use clap::Parser;
 use std::path::PathBuf;
 
@@ -75,34 +75,19 @@ fn write_wav(samples: &[i16], sample_rate: u32, path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn play_audio(samples: &[i16], sample_rate: u32) -> Result<()> {
-    use rodio::{buffer::SamplesBuffer, OutputStream, Sink};
-    let (_stream, stream_handle) = OutputStream::try_default()
-        .context("Failed to open audio output device")?;
-    let sink = Sink::try_new(&stream_handle)?;
-    let source = SamplesBuffer::new(1, sample_rate, samples.to_vec());
-    sink.append(source);
-    sink.sleep_until_end();
-    Ok(())
-}
-
 fn speak_and_output(voice: &mut yuri::Voice, text: &str, cli: &Cli) -> Result<()> {
     let t0 = std::time::Instant::now();
-    let samples = voice.synthesize(text)?;
-    let audio_dur = samples.len() as f64 / yuri::SAMPLE_RATE as f64;
-
-    if samples.is_empty() {
-        eprintln!("Warning: no audio produced for \"{}\"", &text[..text.len().min(30)]);
-        return Ok(());
-    }
 
     if let Some(ref path) = cli.output {
+        let samples = voice.synthesize(text)?;
+        let audio_dur = samples.len() as f64 / yuri::SAMPLE_RATE as f64;
         write_wav(&samples, yuri::SAMPLE_RATE, path)?;
+        eprintln!("{:.0}ms synth, {:.1}s audio", t0.elapsed().as_secs_f64() * 1000.0, audio_dur);
     } else {
-        play_audio(&samples, yuri::SAMPLE_RATE)?;
+        voice.speak_to_device(text)?;
+        eprintln!("{:.0}ms", t0.elapsed().as_secs_f64() * 1000.0);
     }
 
-    eprintln!("{:.0}ms synth, {:.1}s audio", t0.elapsed().as_secs_f64() * 1000.0, audio_dur);
     Ok(())
 }
 

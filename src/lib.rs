@@ -364,6 +364,32 @@ impl Voice {
         Ok(())
     }
 
+    /// Synthesize speech and play it through the default audio output device.
+    ///
+    /// Audio is streamed to the device as chunks are produced, so playback
+    /// begins almost immediately. Blocks until playback is complete.
+    ///
+    /// Requires the `playback` feature (enabled by default).
+    #[cfg(feature = "playback")]
+    pub fn speak_to_device(&mut self, text: &str) -> Result<()> {
+        use rodio::{buffer::SamplesBuffer, OutputStream, Sink};
+
+        let (_stream, handle) = OutputStream::try_default()
+            .context("Failed to open audio output device")?;
+        let sink = Sink::try_new(&handle)?;
+
+        self.speak(text, |event| {
+            if let SpeechEvent::Audio(chunk) = event {
+                let source = SamplesBuffer::new(1, chunk.sample_rate, chunk.samples);
+                sink.append(source);
+            }
+            Ok(())
+        })?;
+
+        sink.sleep_until_end();
+        Ok(())
+    }
+
     /// Override synthesis limits (max duration, idle iterations).
     pub fn set_limits(&mut self, limits: SynthesisLimits) {
         self.limits = limits;

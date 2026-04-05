@@ -12,8 +12,9 @@ name = "yuri"
 path = "src/main.rs"
 
 [features]
-default = ["cli"]
-cli = ["dep:clap", "dep:hound", "dep:rodio", "dep:dirs"]
+default = ["cli", "playback"]
+playback = ["dep:rodio"]
+cli = ["dep:clap", "dep:hound", "dep:dirs", "playback"]
 
 [dependencies]
 wasmtime = "29"
